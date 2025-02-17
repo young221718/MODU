@@ -46,8 +46,9 @@ class MODUdecoder(nn.Module):
         eval_idx=-1,
         eps=1e-2,
         aux_loss=True,
-        is_decoder_pos=False,
-        attn_swap=False,
+        position_guided_sampling=True,
+        query_decoupling= True,
+        attn_rearrange =True,
     ):
 
         super().__init__()
@@ -84,8 +85,9 @@ class MODUdecoder(nn.Module):
             activation,
             num_levels,
             num_decoder_points,
-            is_decoder_pos=is_decoder_pos,
-            attn_swap=attn_swap,
+            position_guided_sampling,
+            query_decoupling,
+            attn_rearrange,
         )
         self.decoder = DinoTransformerDecoder(
             dim, decoder_layer, num_decoder_layers, eval_idx

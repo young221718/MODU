@@ -141,7 +141,7 @@ class MSDeformableAttention(nn.Module):
 
 
 @register
-class MSDeformableAttention_condition(nn.Module):
+class QDDeformableAttention(nn.Module):
     def __init__(
         self,
         embed_dim=256,

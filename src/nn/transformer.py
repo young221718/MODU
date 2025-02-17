@@ -107,12 +107,12 @@ class DeformableTransformerDecoderLayer(nn.Module):
         activation="relu",
         n_levels=4,
         n_points=4,
-        deformable_attn: nn.Module = MSDeformableAttention,
-        is_decoder_pos: bool = False,
-        attn_swap=False,
+        position_guided_sampling: bool=False,
+        query_decoupling: bool = False,
+        attn_rearrange: bool =False,
     ):
         super().__init__()
-        self.attn_swap = attn_swap
+        
         # self attention
         self.self_attn = nn.MultiheadAttention(
             d_model, n_head, dropout=dropout, batch_first=True
@@ -121,10 +121,10 @@ class DeformableTransformerDecoderLayer(nn.Module):
         self.norm1 = nn.LayerNorm(d_model)
 
         # cross attention
-        if deformable_attn is None:
+        if not position_guided_sampling:
             self.cross_attn = MSDeformableAttention(d_model, n_head, n_levels, n_points)
         else:
-            self.cross_attn = deformable_attn(d_model, n_head, n_levels, n_points)
+            self.cross_attn = QDDeformableAttention(d_model, n_head, n_levels, n_points)
         self.dropout2 = nn.Dropout(dropout)
         self.norm2 = nn.LayerNorm(d_model)
 
@@ -139,7 +139,10 @@ class DeformableTransformerDecoderLayer(nn.Module):
         self.dropout4 = nn.Dropout(dropout)
         self.norm3 = nn.LayerNorm(d_model)
 
-        self.is_decoder_pos = is_decoder_pos
+        self.position_guided_sampling = position_guided_sampling
+        self.query_decoupling = query_decoupling
+        self.attn_rearrange = attn_rearrange
+        
         # self._reset_parameters()
 
     # def _reset_parameters(self):
@@ -162,7 +165,7 @@ class DeformableTransformerDecoderLayer(nn.Module):
         query_pos_embed=None,
     ):
 
-        if not self.attn_swap:
+        if not self.attn_rearrange:
             # self attention
             q = k = self.with_pos_embed(tgt, query_pos_embed)
             tgt2, _ = self.self_attn(q, k, value=tgt, attn_mask=attn_mask)
@@ -172,7 +175,7 @@ class DeformableTransformerDecoderLayer(nn.Module):
             # cross attention
             query = (
                 self.with_pos_embed(tgt, query_pos_embed)
-                if not self.is_decoder_pos
+                if not self.query_decoupling
                 else torch.cat([tgt, query_pos_embed], dim=-1)
             )
 
@@ -189,7 +192,7 @@ class DeformableTransformerDecoderLayer(nn.Module):
             # cross attention
             query = (
                 self.with_pos_embed(tgt, query_pos_embed)
-                if not self.is_decoder_pos
+                if not self.query_decoupling
                 else torch.cat([tgt, query_pos_embed], dim=-1)
             )
 

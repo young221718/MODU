@@ -7,12 +7,12 @@ from src.core import register
 
 
 __all__ = [
-    "MODU",
+    "Dexter",
 ]
 
 
 @register
-class MODU(nn.Module):
+class Dexter(nn.Module):
     __inject__ = [
         "backbone",
         "encoder",
@@ -43,11 +43,4 @@ class MODU(nn.Module):
 
         return output
 
-    def deploy(
-        self,
-    ):
-        self.eval()
-        for m in self.modules():
-            if hasattr(m, "convert_to_deploy"):
-                m.convert_to_deploy()
-        return self
+    

@@ -3,18 +3,18 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.nn.conv import MSCAN_CCFF
+from src.nn.conv import MSCAN_CCFF, ConvNextv2_CCFF
 from src.nn.transformer import TransformerEncoder, TransformerEncoderLayer
 from src.utils.utils import LayerNorm
 
 from src.core import register
 
 
-__all__ = ["MODUencoder"]
+__all__ = ["DexterEncoder"]
 
 
 @register
-class MODUencoder(nn.Module):
+class DexterEncoder(nn.Module):
     def __init__(
         self,
         in_channels=[512, 1024, 2048],
@@ -24,6 +24,7 @@ class MODUencoder(nn.Module):
         dim_feedforward=1024,
         dropout=0.0,
         enc_act="gelu",
+        start_idx=0,
         use_encoder_idx=[2],
         num_encoder_layers=1,
         pe_temperature=10000,
@@ -43,6 +44,8 @@ class MODUencoder(nn.Module):
 
         self.out_channels = [dim for _ in range(len(in_channels))]
         self.out_strides = feat_strides
+
+        self.start_idx = start_idx
 
         # channel projection
         self.input_proj = nn.ModuleList()
@@ -74,7 +77,7 @@ class MODUencoder(nn.Module):
         # top-down fpn
         self.lateral_convs = nn.ModuleList()
         self.fpn_blocks = nn.ModuleList()
-        for _ in range(len(in_channels) - 1, 0, -1):
+        for _ in range(len(in_channels) - 1, start_idx, -1):
             self.lateral_convs.append(
                 nn.Sequential(
                     nn.Conv2d(dim, dim, 1, 1),
@@ -95,7 +98,7 @@ class MODUencoder(nn.Module):
         # bottom-up pan
         self.downsample_convs = nn.ModuleList()
         self.pan_blocks = nn.ModuleList()
-        for _ in range(len(in_channels) - 1):
+        for _ in range(start_idx, len(in_channels) - 1):
             self.downsample_convs.append(
                 nn.Sequential(
                     LayerNorm(dim, eps=1e-6, data_format="channels_first"),
@@ -174,7 +177,7 @@ class MODUencoder(nn.Module):
 
         # broadcasting and fusion
         inner_outs = [proj_feats[-1]]
-        for idx in range(len(self.in_channels) - 1, 0, -1):
+        for idx in range(len(self.in_channels) - 1, self.start_idx, -1):
             feat_high = inner_outs[0]
             feat_low = proj_feats[idx - 1]
             feat_high = self.lateral_convs[len(self.in_channels) - 1 - idx](feat_high)
@@ -186,7 +189,7 @@ class MODUencoder(nn.Module):
             inner_outs.insert(0, inner_out)
 
         outs = [inner_outs[0]]
-        for idx in range(len(self.in_channels) - 1):
+        for idx in range(len(self.in_channels) - 1 - self.start_idx):
             feat_low = outs[-1]
             feat_high = inner_outs[idx + 1]
             downsample_feat = self.downsample_convs[idx](feat_low)
@@ -194,5 +197,8 @@ class MODUencoder(nn.Module):
                 torch.concat([downsample_feat, feat_high], dim=1)
             )
             outs.append(out)
+
+        for idx in range(self.start_idx):
+            outs.insert(idx, proj_feats[idx])
 
         return outs

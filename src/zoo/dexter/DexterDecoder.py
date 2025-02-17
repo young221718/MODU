@@ -9,6 +9,7 @@ from src.utils.denoising import get_contrastive_denoising_training_group
 from src.utils.utils import bias_init_with_prob
 from src.nn.transformer import (
     DinoTransformerDecoder,
+    SQDinoTransformerDecoder,
     DeformableTransformerDecoderLayer,
     MLP,
 )
@@ -16,11 +17,11 @@ from src.nn.transformer import (
 from src.core import register
 
 
-__all__ = ["MODUdecoder"]
+__all__ = ["DexterDecoder"]
 
 
 @register
-class MODUdecoder(nn.Module):
+class DexterDecoder(nn.Module):
     __share__ = ["num_classes"]
 
     def __init__(
@@ -32,6 +33,7 @@ class MODUdecoder(nn.Module):
         feat_channels=[512, 1024, 2048],
         feat_strides=[8, 16, 32],
         num_levels=3,
+        query_select_start_levels=0,
         num_decoder_points=4,
         nhead=8,
         num_decoder_layers=6,
@@ -46,8 +48,9 @@ class MODUdecoder(nn.Module):
         eval_idx=-1,
         eps=1e-2,
         aux_loss=True,
-        is_decoder_pos=False,
-        attn_swap=False,
+        query_decomp=False,
+        attn_reorder=False,
+        num_drop_queries=[50, 50, 50],
     ):
 
         super().__init__()
@@ -71,6 +74,7 @@ class MODUdecoder(nn.Module):
         self.num_decoder_layers = num_decoder_layers
         self.eval_spatial_size = eval_spatial_size
         self.aux_loss = aux_loss
+        self.query_select_start_levels = query_select_start_levels
 
         # backbone feature projection
         self._build_input_proj_layer(feat_channels)
@@ -84,11 +88,11 @@ class MODUdecoder(nn.Module):
             activation,
             num_levels,
             num_decoder_points,
-            is_decoder_pos=is_decoder_pos,
-            attn_swap=attn_swap,
+            query_decomp=query_decomp,
+            attn_reorder=attn_reorder,
         )
-        self.decoder = DinoTransformerDecoder(
-            dim, decoder_layer, num_decoder_layers, eval_idx
+        self.decoder = SQDinoTransformerDecoder(
+            dim, decoder_layer, num_decoder_layers, num_drop_queries, eval_idx
         )
 
         self.num_denoising = num_denoising
@@ -126,8 +130,8 @@ class MODUdecoder(nn.Module):
         )
 
         # init encoder output anchors and valid_mask
-        if self.eval_spatial_size:
-            self.anchors, self.valid_mask = self._generate_anchors()
+        # if self.eval_spatial_size:
+        #     self.anchors, self.valid_mask = self._generate_anchors()
 
         self._reset_parameters()
 
@@ -234,7 +238,7 @@ class MODUdecoder(nn.Module):
         if spatial_shapes is None:
             spatial_shapes = [
                 [int(self.eval_spatial_size[0] / s), int(self.eval_spatial_size[1] / s)]
-                for s in self.feat_strides
+                for s in self.feat_strides[1:]
             ]
         anchors = []
         for lvl, (h, w) in enumerate(spatial_shapes):
@@ -265,66 +269,86 @@ class MODUdecoder(nn.Module):
     ):
         bs, _, _ = memory.shape
         # prepare input for decoder
-        if self.training or self.eval_spatial_size is None:
-            anchors, valid_mask = self._generate_anchors(
-                spatial_shapes, device=memory.device
-            )
-        else:
-            anchors, valid_mask = self.anchors.to(memory.device), self.valid_mask.to(
-                memory.device
-            )
 
-        # memory = torch.where(valid_mask, memory, 0)
-        memory = (
-            valid_mask.to(memory.dtype) * memory
-        )  # TODO fix type error for onnx export
+        before_idx = 0
+        target_list = []
+        reference_points_unact_list = []
+        enc_topk_bboxes_list = []
+        enc_topk_logits_list = []
 
-        output_memory = self.enc_output(memory)
+        # print("spatial_shapes", spatial_shapes)
+        for h, w in spatial_shapes:
 
-        enc_outputs_class = self.enc_score_head(output_memory)
-        enc_outputs_coord_unact = self.enc_bbox_head(output_memory) + anchors
+            temp_memory = memory[:, before_idx : before_idx + h * w, :]
+            before_idx += h * w
 
-        _, topk_ind = torch.topk(
-            enc_outputs_class.max(-1).values, self.num_queries, dim=1
-        )
+            anchors, valid_mask = self._generate_anchors([[h, w]], device=memory.device)
 
-        reference_points_unact = enc_outputs_coord_unact.gather(
-            dim=1,
-            index=topk_ind.unsqueeze(-1).repeat(
-                1, 1, enc_outputs_coord_unact.shape[-1]
-            ),
-        )
+            # memory = torch.where(valid_mask, memory, 0)
+            # print(temp_memory.shape, valid_mask.shape)
+            temp_memory = (
+                valid_mask.to(memory.dtype) * temp_memory
+            )  # TODO fix type error for onnx export
 
-        enc_topk_bboxes = F.sigmoid(reference_points_unact)
-        if denoising_bbox_unact is not None:
-            reference_points_unact = torch.concat(
-                [denoising_bbox_unact, reference_points_unact], 1
+            output_memory = self.enc_output(temp_memory)
+
+            enc_outputs_class = self.enc_score_head(output_memory)
+            enc_outputs_coord_unact = self.enc_bbox_head(output_memory) + anchors
+
+            _, topk_ind = torch.topk(
+                enc_outputs_class.max(-1).values, self.num_queries // 3, dim=1
             )
 
-        enc_topk_logits = enc_outputs_class.gather(
-            dim=1,
-            index=topk_ind.unsqueeze(-1).repeat(1, 1, enc_outputs_class.shape[-1]),
-        )
-
-        # extract region features
-        if self.learnt_init_query:
-            target = self.tgt_embed.weight.unsqueeze(0).tile([bs, 1, 1])
-        else:
-            target = output_memory.gather(
+            reference_points_unact = enc_outputs_coord_unact.gather(
                 dim=1,
-                index=topk_ind.unsqueeze(-1).repeat(1, 1, output_memory.shape[-1]),
+                index=topk_ind.unsqueeze(-1).repeat(
+                    1, 1, enc_outputs_coord_unact.shape[-1]
+                ),
             )
-            target = target.detach()
+            reference_points_unact_list.append(reference_points_unact)
+
+            enc_topk_bboxes_list.append(F.sigmoid(reference_points_unact))
+            # if denoising_bbox_unact is not None:
+            #     reference_points_unact = torch.concat(
+            #         [denoising_bbox_unact, reference_points_unact], 1
+            #     )
+
+            enc_topk_logits_list.append(
+                enc_outputs_class.gather(
+                    dim=1,
+                    index=topk_ind.unsqueeze(-1).repeat(
+                        1, 1, enc_outputs_class.shape[-1]
+                    ),
+                )
+            )
+
+            # extract region features
+            if self.learnt_init_query:
+                target = self.tgt_embed.weight.unsqueeze(0).tile([bs, 1, 1])
+            else:
+                target = output_memory.gather(
+                    dim=1,
+                    index=topk_ind.unsqueeze(-1).repeat(1, 1, output_memory.shape[-1]),
+                )
+                target = target.detach()
+            target_list.append(target)
+
+        target = torch.concat(target_list, 1)
+        reference_points_unact = torch.concat(reference_points_unact_list, 1)
+        enc_topk_bboxes = torch.concat(enc_topk_bboxes_list, 1)
+        enc_topk_logits = torch.concat(enc_topk_logits_list, 1)
 
         if denoising_class is not None:
             target = torch.concat([denoising_class, target], 1)
+            reference_points_unact = torch.concat(
+                [denoising_bbox_unact, reference_points_unact], 1
+            )
 
         return (
             target,
             reference_points_unact.detach(),
             enc_topk_bboxes,
             enc_topk_logits,
-            topk_ind,
         )
 
     def forward(self, feats, targets=None):
@@ -352,13 +376,20 @@ class MODUdecoder(nn.Module):
                 None,
             )
 
-        target, init_ref_points_unact, enc_topk_bboxes, enc_topk_logits, topk_idx = (
+        tgt_spatial_shape = spatial_shapes[self.query_select_start_levels :]
+        tgt_idx = sum([h * w for h, w in tgt_spatial_shape])
+
+        target, init_ref_points_unact, enc_topk_bboxes, enc_topk_logits = (
             self._get_decoder_input(
-                memory, spatial_shapes, denoising_class, denoising_bbox_unact
+                memory[:, -tgt_idx:, :],
+                tgt_spatial_shape,
+                denoising_class,
+                denoising_bbox_unact,
             )
         )
 
         # decoder
+        num_dn = dn_meta["dn_num_split"][0] if dn_meta is not None else 0
         out_bboxes, out_logits = self.decoder(
             target,
             init_ref_points_unact,
@@ -369,26 +400,41 @@ class MODUdecoder(nn.Module):
             self.dec_score_head,
             self.query_pos_head,
             attn_mask=attn_mask,
+            num_dn=num_dn,
         )
 
         if self.training and dn_meta is not None:
-            dn_out_bboxes, out_bboxes = torch.split(
-                out_bboxes, dn_meta["dn_num_split"], dim=2
-            )
-            dn_out_logits, out_logits = torch.split(
-                out_logits, dn_meta["dn_num_split"], dim=2
-            )
+            dn_out_bboxes, dn_out_logits = [], []
+            pred_bboxes, pred_logits = [], []
+            for out_bbox, out_logit in zip(out_bboxes, out_logits):
+                dn_out_bboxes.append(out_bbox[:, :num_dn])
+                dn_out_logits.append(out_logit[:, :num_dn])
+                pred_bboxes.append(out_bbox[:, num_dn:])
+                pred_logits.append(out_logit[:, num_dn:])
 
-        out = {"pred_logits": out_logits[-1], "pred_boxes": out_bboxes[-1]}
+            dn_out_bboxes = torch.concat(dn_out_bboxes, 1)
+            dn_out_logits = torch.concat(dn_out_logits, 1)
+        else:
+            pred_bboxes, pred_logits = out_bboxes, out_logits
+            # dn_out_bboxes, out_bboxes = torch.split(
+            #     out_bboxes, dn_meta["dn_num_split"], dim=2
+            # )
+            # dn_out_logits, out_logits = torch.split(
+            #     out_logits, dn_meta["dn_num_split"], dim=2
+            # )
+
+        out = {"pred_logits": pred_logits[-1], "pred_boxes": pred_bboxes[-1]}
 
         if self.training and self.aux_loss:
-            out["aux_outputs"] = self._set_aux_loss(out_logits[:-1], out_bboxes[:-1])
+            out["aux_outputs"] = self._set_aux_loss(pred_logits[:-1], pred_bboxes[:-1])
             out["aux_outputs"].extend(
                 self._set_aux_loss([enc_topk_logits], [enc_topk_bboxes])
             )
 
             if self.training and dn_meta is not None:
-                out["dn_aux_outputs"] = self._set_aux_loss(dn_out_logits, dn_out_bboxes)
+                out["dn_aux_outputs"] = self._set_aux_loss(
+                    [dn_out_logits], [dn_out_bboxes]
+                )
                 out["dn_meta"] = dn_meta
 
         return out

@@ -107,12 +107,12 @@ class DeformableTransformerDecoderLayer(nn.Module):
         activation="relu",
         n_levels=4,
         n_points=4,
-        deformable_attn: nn.Module = MSDeformableAttention,
-        is_decoder_pos: bool = False,
-        attn_swap=False,
+        # deformable_attn: nn.Module = MSDeformableAttention,
+        query_decomp: bool = False,
+        attn_reorder=False,
     ):
         super().__init__()
-        self.attn_swap = attn_swap
+        self.attn_reorder = attn_reorder
         # self attention
         self.self_attn = nn.MultiheadAttention(
             d_model, n_head, dropout=dropout, batch_first=True
@@ -121,10 +121,12 @@ class DeformableTransformerDecoderLayer(nn.Module):
         self.norm1 = nn.LayerNorm(d_model)
 
         # cross attention
-        if deformable_attn is None:
+        if query_decomp == False:
             self.cross_attn = MSDeformableAttention(d_model, n_head, n_levels, n_points)
         else:
-            self.cross_attn = deformable_attn(d_model, n_head, n_levels, n_points)
+            self.cross_attn = MSDeformableAttention_condition(
+                d_model, n_head, n_levels, n_points
+            )
         self.dropout2 = nn.Dropout(dropout)
         self.norm2 = nn.LayerNorm(d_model)
 
@@ -139,7 +141,7 @@ class DeformableTransformerDecoderLayer(nn.Module):
         self.dropout4 = nn.Dropout(dropout)
         self.norm3 = nn.LayerNorm(d_model)
 
-        self.is_decoder_pos = is_decoder_pos
+        self.is_decoder_pos = query_decomp
         # self._reset_parameters()
 
     # def _reset_parameters(self):
@@ -162,7 +164,7 @@ class DeformableTransformerDecoderLayer(nn.Module):
         query_pos_embed=None,
     ):
 
-        if not self.attn_swap:
+        if not self.attn_reorder:
             # self attention
             q = k = self.with_pos_embed(tgt, query_pos_embed)
             tgt2, _ = self.self_attn(q, k, value=tgt, attn_mask=attn_mask)
@@ -284,3 +286,105 @@ class DinoTransformerDecoder(nn.Module):
             )
 
         return torch.stack(dec_out_bboxes), torch.stack(dec_out_logits)
+
+
+class SQDinoTransformerDecoder(nn.Module):
+    def __init__(
+        self,
+        hidden_dim,
+        decoder_layer,
+        num_layers,
+        num_drop_queries=[50, 50, 50],
+        eval_idx=-1,
+    ):
+        assert len(num_drop_queries) == num_layers
+        super().__init__()
+
+        self.layers = nn.ModuleList(
+            [copy.deepcopy(decoder_layer) for _ in range(num_layers)]
+        )
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+        self.num_drop_queries = num_drop_queries
+        self.eval_idx = eval_idx if eval_idx >= 0 else num_layers + eval_idx
+
+    def forward(
+        self,
+        tgt,
+        ref_points_unact,
+        memory,
+        memory_spatial_shapes,
+        memory_level_start_index,
+        bbox_head,
+        score_head,
+        query_pos_head,
+        attn_mask=None,
+        memory_mask=None,
+        num_dn=0,
+    ):
+        output = tgt
+        dec_out_bboxes = []
+        dec_out_logits = []
+        ref_points_detach = F.sigmoid(ref_points_unact)
+
+        for i, layer in enumerate(self.layers):
+            ref_points_input = ref_points_detach.unsqueeze(2)
+            query_pos_embed = query_pos_head(ref_points_detach)
+
+            output = layer(
+                output,
+                ref_points_input,
+                memory,
+                memory_spatial_shapes,
+                memory_level_start_index,
+                attn_mask,
+                memory_mask,
+                query_pos_embed,
+            )
+
+            logits = score_head[i](output)
+
+            # ============ query selection
+            b, query, _ = output.shape
+            k = query - num_dn - self.num_drop_queries[i]
+            _, topk_idx = torch.topk(logits[:, num_dn:].max(-1).values, k, dim=1)
+            topk_idx += num_dn
+            output = torch.cat(
+                (
+                    output[:, :num_dn, :],
+                    output[torch.arange(b).unsqueeze(1), topk_idx, :],
+                ),
+                dim=1,
+            )
+            ref_points_detach = torch.cat(
+                (
+                    ref_points_detach[:, :num_dn, :],
+                    ref_points_detach[torch.arange(b).unsqueeze(1), topk_idx, :],
+                ),
+                dim=1,
+            )
+            if attn_mask is not None:
+                attn_mask = attn_mask[
+                    : -self.num_drop_queries[i], : -self.num_drop_queries[i]
+                ]
+            # ==========================
+
+            inter_ref_bbox = F.sigmoid(
+                bbox_head[i](output) + inverse_sigmoid(ref_points_detach)
+            )
+            logits = score_head[i](output)
+
+            if self.training:
+                dec_out_logits.append(logits)
+                dec_out_bboxes.append(inter_ref_bbox)
+            elif i == self.eval_idx:
+                dec_out_logits.append(logits)
+                dec_out_bboxes.append(inter_ref_bbox)
+                break
+
+            # ref_points = inter_ref_bbox
+            ref_points_detach = (
+                inter_ref_bbox.detach() if self.training else inter_ref_bbox
+            )
+
+        return dec_out_bboxes, dec_out_logits

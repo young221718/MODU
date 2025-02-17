@@ -1,2 +1,2 @@
 # from .rtdetr import *
-from .MODU import *
+from .dexter import *

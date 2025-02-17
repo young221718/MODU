@@ -98,6 +98,7 @@ class ConvNeXtV2(nn.Module):
         drop_path_rate=0.0,
         return_idx=[0, 1, 2, 3],
         pretrained=True,
+        freeze_at=-1,
     ):
         super().__init__()
 
@@ -140,11 +141,11 @@ class ConvNeXtV2(nn.Module):
 
         self.out_indices = return_idx
 
-        norm_layer = partial(LayerNorm, eps=1e-6, data_format="channels_first")
-        for i_layer in range(4):
-            layer = norm_layer(dims[i_layer])
-            layer_name = f"norm{i_layer}"
-            self.add_module(layer_name, layer)
+        # norm_layer = partial(LayerNorm, eps=1e-6, data_format="channels_first")
+        # for i_layer in range(4):
+        #     layer = norm_layer(dims[i_layer])
+        #     layer_name = f"norm{i_layer}"
+        #     self.add_module(layer_name, layer)
 
         if pretrained:
             url = model_urls[model_size]
@@ -153,17 +154,25 @@ class ConvNeXtV2(nn.Module):
             )
             _tmp_st_output = self.load_state_dict(checkpoint["model"], strict=False)
             print(str(_tmp_st_output))
-        # self.norm = nn.LayerNorm(dims[-1], eps=1e-6) # final norm layer
-        # self.head = nn.Linear(dims[-1], num_classes)
 
-        # self.apply(self._init_weights)
-        # self.head.weight.data.mul_(head_init_scale)
-        # self.head.bias.data.mul_(head_init_scale)
+        print(f"freeze at: {freeze_at}")
+        if freeze_at > 0:
+            print(f"Freezing up to stage {freeze_at}")
+            for i in range(0, min(freeze_at, 4)):
+                # print(i)
+                self._freeze_parameters(self.downsample_layers[i])
+                self._freeze_parameters(self.stages[i])
+
+        # print(self)
 
     def _init_weights(self, m):
         if isinstance(m, (nn.Conv2d, nn.Linear)):
             trunc_normal_(m.weight, std=0.02)
             nn.init.constant_(m.bias, 0)
+
+    def _freeze_parameters(self, m: nn.Module):
+        for p in m.parameters():
+            p.requires_grad = False
 
     def forward_features(self, x):
         outs = []
@@ -182,11 +191,9 @@ class ConvNeXtV2(nn.Module):
 
 
 if __name__ == "__main__":
+    model = ConvNeXtV2(model_size="atto", pretrained=True)
 
-    for model_size in ConvNext_cfg.keys():
-        model = ConvNeXtV2(model_size=model_size, pretrained=True)
-
-        x = torch.randn(1, 3, 640, 640)
-        outs = model(x)
-        for out in outs:
-            print(out.shape)
+    x = torch.randn(1, 3, 640, 640)
+    outs = model(x)
+    for out in outs:
+        print(out.shape)

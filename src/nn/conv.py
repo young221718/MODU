@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
+from timm.models.layers import trunc_normal_, DropPath
+
 from src.utils.utils import get_activation, LayerNorm, GRN
 
 
@@ -299,6 +301,87 @@ class MSCAN_CCFF(nn.Module):
 
         self.bottlenecks = nn.Sequential(
             *[MSCAN_Block(hidden_channels) for _ in range(num_blocks)]
+        )
+        if hidden_channels != out_channels:
+            self.conv3 = nn.Sequential(
+                nn.Conv2d(hidden_channels, out_channels, 1, bias=bias),
+                nn.GELU(),
+                LayerNorm(out_channels, data_format="channels_first"),
+            )
+        else:
+            self.conv3 = nn.Identity()
+
+    def forward(self, x):
+        x_1 = self.conv1(x)
+        x_1 = self.bottlenecks(x_1)
+        x_2 = self.conv2(x)
+        return self.conv3(x_1 + x_2)
+
+
+class ConvNextv2Block(nn.Module):
+    """ConvNeXtV2 Block.
+
+    Args:
+        dim (int): Number of input channels.
+        drop_path (float): Stochastic depth rate. Default: 0.0
+    """
+
+    def __init__(self, dim, drop_path=0.0):
+        super().__init__()
+        self.dwconv = nn.Conv2d(
+            dim, dim, kernel_size=7, padding=3, groups=dim
+        )  # depthwise conv
+        self.norm = LayerNorm(dim, eps=1e-6)
+        self.pwconv1 = nn.Linear(
+            dim, 4 * dim
+        )  # pointwise/1x1 convs, implemented with linear layers
+        self.act = nn.GELU()
+        self.grn = GRN(4 * dim)
+        self.pwconv2 = nn.Linear(4 * dim, dim)
+        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+
+    def forward(self, x):
+        input = x
+        x = self.dwconv(x)
+        x = x.permute(0, 2, 3, 1)  # (N, C, H, W) -> (N, H, W, C)
+        x = self.norm(x)
+        x = self.pwconv1(x)
+        x = self.act(x)
+        x = self.grn(x)
+        x = self.pwconv2(x)
+        x = x.permute(0, 3, 1, 2)  # (N, H, W, C) -> (N, C, H, W)
+
+        x = input + self.drop_path(x)
+        return x
+
+
+class ConvNextv2_CCFF(nn.Module):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        num_blocks=3,
+        expansion=1.0,
+        bias=None,
+        act="silu",
+    ):
+        super().__init__()
+        hidden_channels = int(out_channels * expansion)
+
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(in_channels, hidden_channels, 1, bias=bias),
+            nn.GELU(),
+            LayerNorm(hidden_channels, data_format="channels_first"),
+        )
+
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(in_channels, hidden_channels, 1, bias=bias),
+            nn.GELU(),
+            LayerNorm(hidden_channels, data_format="channels_first"),
+        )
+
+        self.bottlenecks = nn.Sequential(
+            *[ConvNextv2Block(hidden_channels) for _ in range(num_blocks)]
         )
         if hidden_channels != out_channels:
             self.conv3 = nn.Sequential(

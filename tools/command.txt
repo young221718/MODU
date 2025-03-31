@@ -15,5 +15,6 @@ python tools/train.py -c /home/work/StudentsWork/Chanyoung/workspace/detection/d
 ==================
 GitHub 귀찮을 때
 git config --global user.email young221718@gmail.com
-git config --global user.name CYinH100
+git config --global user.name CYinLuLu-lab
 
+python tools/train.py -c C:\workspace\MODU\configs\RM-DETR\r50_250311.yml

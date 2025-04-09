@@ -32,7 +32,6 @@ ConvertImageDtype = register(T.ConvertImageDtype)
 SanitizeBoundingBoxes = register(T.SanitizeBoundingBoxes)
 RandomCrop = register(T.RandomCrop)
 Normalize = register(T.Normalize)
-RandomRotation = register(T.RandomRotation)
 
 
 @register

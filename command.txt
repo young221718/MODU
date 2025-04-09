@@ -2,7 +2,7 @@
 torchrun --nproc_per_node=2 tools/train.py -c /home/prml/StudentsWork/Chanyoung/workspace/detection/detr/graduate_project/configs/rtdetr_pos_attn/r50_coco_72epc_pos_cond.yml
 
 # 특정 GPU 학습 예제 / -c 뒤에 config path
-CUDA_VISIBLE_DEVICES=1 python tools/train.py -c /home/work/StudentsWork/Chanyoung/workspace/detection/detr/graduate_project/configs/rtdetr/convnext_ag_256dim_coco_48epc_pos.yml
+CUDA_VISIBLE_DEVICES=3 python tools/train.py -c /workspace/chanyoung/code/MODU/configs/NeXt-DETR_lulu/atto_multi.yml
 
 # 단일(0번) GPU 학습 예제
 python tools/train.py -c /home/work/StudentsWork/Chanyoung/workspace/detection/detr/graduate_project/configs/rtdetr/convnext_ag_256dim_coco_tuning.yml -t /home/work/StudentsWork/Chanyoung/workspace/_experiments/graduate/rtdetr_convnext_ag_256dim_coco_241017/best.pth
@@ -18,3 +18,7 @@ git config --global user.email young221718@gmail.com
 git config --global user.name CYinLuLu-lab
 
 python tools/train.py -c C:\workspace\MODU\configs\RM-DETR\r50_250311.yml
+
+
+
+CUDA_VISIBLE_DEVICES=2,3 torchrun --nproc_per_node=2 tools/train.py -c /workspace/chanyoung/code/MODU/configs/NeXt-DETR_lulu/tiny_multi_channel.yml -t /workspace/chanyoung/code/MODU/tiny.pth

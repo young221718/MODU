@@ -1,0 +1,144 @@
+task: detection
+
+__include__: ["../runtime.yml", "../include/optimizer.yml"]
+output_dir: /workspace/chanyoung/code/MODU/output/lulu/kiosk/tiny_250414
+epoches: 500
+
+# ======================== Dataset Config ======================== #
+num_classes: 2
+remap_mscoco_category: True
+
+train_dataloader:
+  type: DataLoader
+  dataset:
+    type: CocoDetection
+    img_folder: /workspace/chanyoung/data/cropped/kiosk/images
+    ann_file: /workspace/chanyoung/data/cropped/kiosk/coco_kiosk_base_instance_seg_channel_train.json
+    transforms:
+      type: Compose
+      ops:
+        - { type: RandomPhotometricDistort, p: 0.5 }
+        - { type: RandomRotation, degrees: [-25, 25] }
+        # - { type: RandomZoomOut, fill: 0 }
+        # - { type: RandomIoUCrop, p: 0.8 }
+        - { type: SanitizeBoundingBoxes, min_size: 1 }
+        - { type: RandomHorizontalFlip }
+        - { type: Resize, size: [480, 640] }
+        - { type: ToImage }
+        - { type: ConvertImageDtype }
+        - { type: SanitizeBoundingBoxes, min_size: 1 }
+        - { type: ConvertBox, out_fmt: "cxcywh", normalize: True }
+  shuffle: True
+  batch_size: 4
+  num_workers: 4
+  drop_last: True
+  collate_fn: default_collate_fn
+
+val_dataloader:
+  type: DataLoader
+  dataset:
+    type: CocoDetection
+    img_folder: /workspace/chanyoung/data/cropped/kiosk/images
+    ann_file: /workspace/chanyoung/data/cropped/kiosk/coco_kiosk_base_instance_seg_channel_val.json
+    transforms:
+      type: Compose
+      ops:
+        - { type: Resize, size: [480, 640] }
+        - { type: ToImage }
+        - { type: ConvertImageDtype }
+
+  shuffle: False
+  batch_size: 4
+  num_workers: 4
+  collate_fn: default_collate_fn
+  drop_last: False
+
+# ======================== Model Config ======================== #
+model: MODU2
+criterion: DETRCriterion
+postprocessor: DETRPostProcessor
+
+MODU2:
+  backbone: ConvNeXtV2
+  encoder: MODU2encoder
+  decoder: MODU2decoder
+  multi_scale: [640]
+  # query_save_path : /workspace/chanyoung/code/MODU/output/lulu/kiosk/tiny_250411/query
+
+
+ConvNeXtV2:
+  model_size: "tiny"
+  return_idx: [1, 2, 3]
+  pretrained: True
+
+MODU2encoder:
+  in_channels: [192, 384, 768]
+  feat_strides: [8, 16, 32]
+
+  # intra
+  dim: 256
+  use_encoder_idx: [2]
+  num_encoder_layers: 1
+  nhead: 8
+  dim_feedforward: 1024
+  dropout: 0.
+  enc_act: "gelu"
+  pe_temperature: 10000
+
+  # cross
+  expansion: 1.0
+  depth_mult: 1.0
+  act: "gelu"
+
+  # eval
+  eval_spatial_size: [480, 640]
+
+MODU2decoder:
+  feat_channels: [256, 256, 256]
+  feat_strides: [8, 16, 32]
+  dim: 256
+  num_levels: 3
+
+  num_queries: 300
+
+  num_decoder_layers: 6
+  num_denoising: 100
+
+  eval_idx: -1
+  eval_spatial_size: [480, 640]
+
+use_focal_loss: True
+
+DETRPostProcessor:
+  num_top_queries: 300
+
+DETRCriterion:
+  weight_dict: { loss_vfl: 1, loss_bbox: 5, loss_giou: 2 }
+  losses: ["vfl", "boxes"]
+  alpha: 0.75
+  gamma: 2.0
+
+  matcher:
+    type: HungarianMatcher
+    weight_dict: { cost_class: 2, cost_bbox: 5, cost_giou: 2 }
+    # use_focal_loss: True
+    alpha: 0.25
+    gamma: 2.0
+
+optimizer:
+  type: AdamW
+  params:
+    - params: "backbone"
+      lr: 0.00001
+    - params: "^(?=.*encoder(?=.*bias|.*norm.*weight)).*$"
+      weight_decay: 0.
+    - params: "^(?=.*decoder(?=.*bias|.*norm.*weight)).*$"
+      weight_decay: 0.
+
+  lr: 0.0001
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+# lr_scheduler:
+#   type: MultiStepLR
+#   milestones: [36, 48]
+#   gamma: 0.5

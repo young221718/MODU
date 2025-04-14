@@ -26,7 +26,7 @@ def train_one_epoch(
     device: torch.device,
     epoch: int,
     max_norm: float = 0,
-    **kwargs
+    **kwargs,
 ):
     model.train()
     criterion.train()
@@ -107,7 +107,7 @@ def evaluate(
 ):
     model.eval()
     criterion.eval()
-
+    step_idx = 0
     metric_logger = MetricLogger(delimiter="  ")
     # metric_logger.add_meter('class_error', SmoothedValue(window_size=1, fmt='{value:.2f}'))
     header = "Test:"
@@ -134,18 +134,36 @@ def evaluate(
 
         outputs = model(samples)
 
-        # loss_dict = criterion(outputs, targets)
-        # weight_dict = criterion.weight_dict
-        # # reduce losses over all GPUs for logging purposes
-        # loss_dict_reduced = reduce_dict(loss_dict)
-        # loss_dict_reduced_scaled = {k: v * weight_dict[k]
-        #                             for k, v in loss_dict_reduced.items() if k in weight_dict}
-        # loss_dict_reduced_unscaled = {f'{k}_unscaled': v
-        #                               for k, v in loss_dict_reduced.items()}
-        # metric_logger.update(loss=sum(loss_dict_reduced_scaled.values()),
-        #                      **loss_dict_reduced_scaled,
-        #                      **loss_dict_reduced_unscaled)
-        # metric_logger.update(class_error=loss_dict_reduced['class_error'])
+        if hasattr(model, "query_save_path") and model.query_save_path is not None:
+            os.makedirs(model.query_save_path, exist_ok=True)
+
+            # 예측값
+            queries = outputs["pred_queries"].detach().cpu()  # (B, Q, D)
+            logits = outputs["pred_logits"].detach().cpu()  # (B, Q, C)
+            boxes = outputs.get("pred_boxes", None)
+            if boxes is not None:
+                boxes = boxes.detach().cpu()
+
+            # targets 정제: 텐서만 골라서 .cpu()
+            clean_targets = []
+            for t in targets:
+                clean_t = {
+                    k: v.detach().cpu() for k, v in t.items() if torch.is_tensor(v)
+                }
+                clean_targets.append(clean_t)
+
+            # 저장
+            step_idx += 1
+            save_path = os.path.join(model.query_save_path, f"step_{step_idx}.pt")
+            torch.save(
+                {
+                    "queries": queries,
+                    "logits": logits,
+                    "boxes": boxes,
+                    "targets": clean_targets,
+                },
+                save_path,
+            )
 
         orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
         results = postprocessors(outputs, orig_target_sizes)

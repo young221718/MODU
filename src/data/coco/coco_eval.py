@@ -119,14 +119,23 @@ class CocoEvaluator(object):
             masks = prediction["masks"]
 
             masks = masks > 0.5
+            masks = masks > 0.5
+            masks = masks.float()
+            masks = masks.cpu().numpy()
+
+            # print(masks.shape, scores.shape, labels.shape)
 
             scores = prediction["scores"].tolist()
             labels = prediction["labels"].tolist()
 
             rles = [
                 mask_util.encode(
-                    np.array(mask[0, :, :, np.newaxis], dtype=np.uint8, order="F")
-                )[0]
+                    np.array(
+                        mask[:, :, np.newaxis], dtype=np.uint8, order="F"
+                    )  # 변경 부분 1
+                )[
+                    0
+                ]  # mask util encode의 반환값이 list일때만 [0]
                 for mask in masks
             ]
             for rle in rles:

@@ -21,4 +21,4 @@ python tools/train.py -c C:\workspace\MODU\configs\RM-DETR\r50_250311.yml
 
 
 
-CUDA_VISIBLE_DEVICES=2,3 torchrun --nproc_per_node=2 tools/train.py -c /workspace/chanyoung/code/MODU/configs/NeXt-DETR_lulu/tiny_multi_channel.yml -t /workspace/chanyoung/code/MODU/tiny.pth
+CUDA_VISIBLE_DEVICES=2,3 torchrun --nproc_per_node=2 tools/train.py -c /workspace/chanyoung/code/MODU/configs/RM-DETR_lulu/r50_multi.yml
